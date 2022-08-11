@@ -1,0 +1,42 @@
+{
+  "name": "rdp",
+  "version": "1.0.1",
+  "description": "Reliable Datagram Protocol",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "rollup -c -w",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "rm -rf dist/* && webpack --mode production"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GYPeng/rdp.git"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.18.10",
+    "@babel/preset-env": "^7.18.10",
+    "@babel/preset-react": "^7.18.6",
+    "@babel/preset-typescript": "^7.18.6",
+    "@types/node": "^18.6.5",
+    "rollup": "^2.77.2",
+    "rollup-plugin-babel": "^4.4.0",
+    "rollup-plugin-typescript2": "^0.32.1",
+    "typescript": "^4.7.4"
+  },
+  "keywords": [
+    "rdp",
+    "udt",
+    "udp",
+    "reliable udp"
+  ],
+  "author": "Alex",
+  "license": "MIT License",
+  "dependencies": {
+    "dgram": "^1.0.1",
+    "events": "^3.3.0"
+  },
+  "bugs": {
+    "url": "https://github.com/GYPeng/rdp.git/issues"
+  },
+  "homepage": "https://github.com/GYPeng/rdp.git#readme"
+}
