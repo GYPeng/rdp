@@ -32,8 +32,7 @@
   "author": "Alex",
   "license": "MIT License",
   "dependencies": {
-    "dgram": "^1.0.1",
-    "events": "^3.3.0"
+    "dgram": "^1.0.1"
   },
   "bugs": {
     "url": "https://github.com/GYPeng/rdp.git/issues"

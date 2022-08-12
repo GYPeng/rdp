@@ -1,25 +1,31 @@
 const dgram = require("dgram");
 const EventEmitter = require("events");
 import connectClient from "./connectClient";
-import { rdp as rdpType, code as CODE, msg as msgType } from "../types/index";
+import { rdp as rdpType, code as CODE, msg as msgType } from "./types/index";
+import { isBuffer, isString, isArray, isObject } from "./utils/index";
 
+let packageCount = 0;
 export default class RDP {
   readonly port: number | string;
   readonly dgram: any;
-  private sourceQueue: any[]; // 原始队列 由send方法产生
-  private sourceConcurrentQueue: any[]; // 原始并发队列 由原始队列计算得出 每个原始请求结束后，会检查原始队列中是否有数据，有则按队列移动一条到原始并发队列
-  private packageConcurrentQueue: any[]; // 包并发队列 原始并发队列经过拥塞计算后得出  此队列中的包在上一个包发送成功，计算拥塞之后按序发送 因为并不会等待当前包组完全发送完毕才发送下一组，因此不能作为包组判断
-  private packageGroupCache: any[]; // 包组缓存，存放未发送成功的数据包组信息 用来判断当前包组是否完全发送完毕，以决定下一步拥塞控制
-  private packageConcurrentCache: any[]; // 包并发缓存 包并发队列中的包被发送后，移动到此  等发送成功后清除/或者发送失败后重发
+  private sourceQueue: any[] = []; // 原始队列 由send方法产生
+  private sourceConcurrentQueue: any[] = []; // 原始并发队列 由原始队列计算得出 每个原始请求结束后，会检查原始队列中是否有数据，有则按队列移动一条到原始并发队列
+  private packageConcurrentQueue: any[] = []; // 包并发队列 原始并发队列经过拥塞计算后得出  此队列中的包在上一个包发送成功，计算拥塞之后按序发送 因为并不会等待当前包组完全发送完毕才发送下一组，因此不能作为包组判断
+  private packageConcurrentCache: any[] = []; // 包并发缓存 包并发队列中的包被发送后，移动到此  等发送成功后清除/packageId
+  private packageFailed: number[] = []; // 发送失败的包 描述
   private coe: number = 1; // 拥塞控制 并发增加系数
   private concurrent: number = 1; // 拥塞控制 当前包并发上限
   private step: number = 1; // 所处阶段 1 慢启动快速增长阶段 2 快速传输微调阶段  当前设计只能由1 -> 2，不会回退
-  private sourceConcurrent: number; // 当前原始请求并发上限
+  private sourceConcurrent: number = 6; // 当前原始请求并发上限
   private connectClientMap: any = {}; // 当前在线的所有客户端
   private connectClientCache: any = {}; // 已发起，但是尚未成功建立的客户端
   private connectServerMap: any = {}; // 当前在线的所有服务端
   private connectServerCache: any = {}; // 已发起，但是尚未成功建立的服务端
   private eventEmitter = new EventEmitter();
+  private sourceId: number = 0;
+  private groupId: number = 0;
+  private packageId: number = 0;
+  private ifSending = false;
   constructor({ port }: rdpType) {
     this.port = port;
     this.dgram = dgram.createSocket("udp4");
@@ -34,8 +40,7 @@ export default class RDP {
         const server = this.connectServerMap[key];
         // 如果服务端超时
         if (server.timeoutCount > 3) {
-          console.log("服务端超时");
-          // 触发该连接对象 error事件
+          // 触发该连接对象 err事件
           server.emit("err", {
             message: "The server failed to respond.",
             target: server,
@@ -72,15 +77,191 @@ export default class RDP {
         }
         client.timeoutCount++;
       }
-    }, 3000);
+    }, 1000);
+  }
+  private sendData(
+    address: string,
+    port: number | string,
+    data: any,
+    callback?: Function
+  ) {
+    // console.log(data.code, (packageCount += data.data?.length || 0));
+    if (callback) {
+      this.dgram.send(
+        Buffer.from(JSON.stringify(data)),
+        port,
+        address,
+        callback
+      );
+    } else {
+      this.dgram.send(
+        Buffer.from(JSON.stringify(data)),
+        port,
+        address,
+        callback
+      );
+    }
   }
   send(address: string, port: number | string, data: any) {
-    this.dgram.send(JSON.stringify(data), port, address);
+    let sourceId = this.sourceId++;
+    const realData = data.data;
+    if (isBuffer(realData)) {
+      this.sourceQueue.push({ address, port, data, type: "buffer", sourceId });
+    } else if (isString(realData)) {
+      this.sourceQueue.push({ address, port, data, type: "string", sourceId });
+    } else if (isArray(realData)) {
+      this.sourceQueue.push({ address, port, data, type: "array", sourceId });
+    } else if (isObject(realData)) {
+      this.sourceQueue.push({ address, port, data, type: "object", sourceId });
+    }
+    // 如果尚未开始发送 启动发送函数
+    if (!this.ifSending) {
+      this.sendWithCon();
+    }
+  }
+  // 发送单个数据包
+  sendOnePackage(
+    address: string,
+    port: number | string,
+    data: any,
+    callback?: Function
+  ) {
+    return new Promise((resolve, reject) => {
+      this.sendData(address, port, data, resolve);
+    });
+  }
+  // 计算得出当前原始并发队列
+  computedSourceConcurrentQueue() {
+    for (
+      let i = 0;
+      i <
+      Math.min(
+        Math.max(this.sourceConcurrent - this.sourceConcurrentQueue.length, 0),
+        this.sourceQueue.length
+      );
+      i++
+    ) {
+      this.sourceConcurrentQueue.push(this.sourceQueue.shift());
+    }
+  }
+  // 获取一个发送失败的数据包
+  getFailedPackage() {
+    const packageId = this.packageFailed.shift();
+    return this.packageConcurrentCache.find((v) => packageId === v.packageId);
+  }
+  // 分包，并计算得出当前包组
+  computedPackageGroup() {
+    // 获取原始并发队列
+    this.computedSourceConcurrentQueue();
+    // 按照sliceBegin从小到大排序
+    this.sourceConcurrentQueue.sort(
+      ({ sliceBegin: sliceBeginA = 0 }, { sliceBegin: sliceBeginB = 0 }) =>
+        sliceBeginA - sliceBeginB
+    );
+    const delArr = [];
+    // 发送失败的包数量
+    let failedCount = this.packageFailed.length;
+    const conPakCount = Math.min(
+      this.concurrent,
+      Math.max(this.sourceConcurrentQueue.length, failedCount)
+    );
+    let groupId = this.groupId++;
+    for (let ind = 0; ind < conPakCount; ind++) {
+      let obj;
+      let i;
+      if (this.packageFailed.length) {
+        obj = this.getFailedPackage();
+      } else {
+        i = (ind - failedCount) % this.sourceConcurrentQueue.length;
+        // 如果该条目已经到达文件尾，忽略该条目
+        if (delArr.includes(i)) {
+          continue;
+        }
+        obj = this.sourceConcurrentQueue[i];
+      }
+      const {
+        address,
+        port,
+        data,
+        type,
+        sliceBegin = 0,
+        sourceId,
+        packageId,
+      } = obj;
+      const realData = data.data;
+
+      let buf;
+      if (["buffer", "string"].includes(type)) {
+        buf = Buffer.from(realData);
+      } else if (["object", "array"].includes(type)) {
+        buf = Buffer.from(JSON.stringify(realData));
+      } else {
+        // 暂不支持其它类型传输
+        continue;
+      }
+      // 切片大小 5kb
+      const sliceEnd = Math.min(buf.length, 100 + sliceBegin);
+      const sliceBuf = buf.subarray(sliceBegin, sliceEnd);
+      // 如果已经到达buf尾
+      if (sliceEnd === buf.length) {
+        // 记录该条目index，以便删除
+        delArr.push(i);
+      }
+      obj.sliceBegin = sliceEnd;
+      // 将切片放入包并发队列
+      const pid = packageId || this.packageId++;
+      this.packageConcurrentQueue.push({
+        address,
+        port,
+        type,
+        data: {
+          ...data,
+          data: sliceBuf,
+          type,
+          sourceId,
+          packageId: pid,
+          groupId,
+        },
+        sourceId,
+        packageId: pid,
+        groupId,
+      });
+      // console.log(this.packageConcurrentQueue);
+    }
+    delArr.sort((a, b) => b - a);
+    // console.log(delArr);
+    delArr.forEach((i) => {
+      // 删除已分包完毕的数据
+      this.sourceConcurrentQueue.splice(i, 1);
+    });
+  }
+  // 发送，并在发送成功之后调用自身
+  async sendWithCon() {
+    this.ifSending = true;
+    // 获取并发包组
+    this.computedPackageGroup();
+    // 所有包全部发送完毕，退出
+    if (!this.packageConcurrentQueue.length) {
+      this.ifSending = false;
+      return;
+    }
+    for (let i = 0; i < this.packageConcurrentQueue.length; i++) {
+      const obj = this.packageConcurrentQueue[i];
+      const { address, port, data } = obj;
+      // console.log(data);
+      await this.sendOnePackage(address, port, data);
+      // 将已发送的包添加到包并发缓存
+      this.packageConcurrentCache.push(obj);
+    }
+    // 清空包并发队列
+    this.packageConcurrentQueue = [];
+
+    this.sendWithCon();
   }
   // “客户端”方法，其实是发起端
   connect(address: string, port: string | number) {
     // 客户端 向目标服务器请求连接
-    this.send(address, port, {
+    this.sendData(address, port, {
       code: CODE.reqConnect,
     });
 
@@ -98,10 +279,13 @@ export default class RDP {
     return this.connectServerCache[`${address}:${port}`];
   }
   bindMessage() {
+    let count = 0;
+    const begin = Date.now();
     this.dgram.on("message", (msg: string, rinfo) => {
       const { port, address } = rinfo;
+      // msg = msg.toString();
       try {
-        const { code, data }: msgType = JSON.parse(msg);
+        const { code, data, ind = 0, group: number }: msgType = JSON.parse(msg);
         // 连接尚未建立  此时接收到非建立连接请求的数据将会被忽略
         if (Number(code) > Number(CODE.sucConnect)) {
           if (
@@ -109,7 +293,7 @@ export default class RDP {
             !this.connectServerMap[`${address}:${port}`]
           ) {
             // 尚未建立连接，却收到高于连接建立的code，返回尚未建立连接code 拒绝连接
-            this.send(address, port, {
+            this.sendData(address, port, {
               code: CODE.reject,
             });
             return;
@@ -120,7 +304,7 @@ export default class RDP {
           // 服务端接收到客户端请求连接
           case CODE.reqConnect: {
             // 回应客户端可以连入
-            this.send(address, port, { code: CODE.recConnect });
+            this.sendData(address, port, { code: CODE.repConnect });
             // 如果目标已在连接列表中，重新连入将会移除之前的连接
             if (this.connectClientMap[`${address}:${port}`]) {
               delete this.connectClientMap[`${address}:${port}`];
@@ -133,7 +317,7 @@ export default class RDP {
             break;
           }
           // 客户端接收到服务端回应
-          case CODE.recConnect: {
+          case CODE.repConnect: {
             // 将当前连接对象移动到已连接map，并从缓存中删除该对象
             this.connectServerMap[`${address}:${port}`] =
               this.connectServerCache[`${address}:${port}`];
@@ -144,7 +328,7 @@ export default class RDP {
               this.connectServerMap[`${address}:${port}`]
             );
             // 回应服务端收到回信 连接建立
-            this.send(address, port, { code: CODE.sucConnect });
+            this.sendData(address, port, { code: CODE.sucConnect });
             break;
           }
           // 服务端接收到客户端回应
@@ -173,6 +357,12 @@ export default class RDP {
             server.timeoutCount--;
             break;
           }
+          // 服务端/客户端接收到数据
+          case CODE.sendData: {
+            // console.log("收到数据", data);
+            console.log((Date.now() - begin) / 1000);
+            break;
+          }
         }
       } catch (e) {
         /**
@@ -180,22 +370,22 @@ export default class RDP {
          */
         for (let key in this.connectClientMap) {
           const client = this.connectClientMap[key];
-          client.emit("error", e);
+          client.emit("err", e);
         }
         for (let key in this.connectServerMap) {
           const client = this.connectServerMap[key];
-          client.emit("error", e);
+          client.emit("err", e);
         }
         /**
          * 向尚未成功建立请求的连接对象抛出错误事件
          */
         for (let key in this.connectClientCache) {
           const client = this.connectClientCache[key];
-          client.emit("error", e);
+          client.emit("err", e);
         }
         for (let key in this.connectServerCache) {
           const client = this.connectServerCache[key];
-          client.emit("error", e);
+          client.emit("err", e);
         }
 
         console.log("发生错误", e);
@@ -207,5 +397,8 @@ export default class RDP {
   }
   emit(eventname, params) {
     this.eventEmitter.emit(eventname, params);
+  }
+  close() {
+    this.dgram.close();
   }
 }

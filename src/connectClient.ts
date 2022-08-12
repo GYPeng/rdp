@@ -1,5 +1,5 @@
 const EventEmitter = require("events");
-import { code as CODE, connectClientEvent } from "../types/index";
+import { code as CODE, connectClientEvent } from "./types/index";
 export default class {
   private rdp: any;
   private [connectClientEvent] = new EventEmitter();
@@ -13,7 +13,7 @@ export default class {
   }
   send(data: any) {
     this.rdp.send(this.address, this.port, {
-      code: CODE.sendString,
+      code: CODE.sendData,
       data,
     });
   }
@@ -26,12 +26,12 @@ export default class {
   // 关闭此连接 会将未发送完的队列全部丢弃，然后关闭连接
   close() {}
   ping() {
-    this.rdp.send(this.address, this.port, {
+    this.rdp.sendData(this.address, this.port, {
       code: CODE.ping,
     });
   }
   pong() {
-    this.rdp.send(this.address, this.port, {
+    this.rdp.sendData(this.address, this.port, {
       code: CODE.pong,
     });
   }
