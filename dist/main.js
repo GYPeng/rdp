@@ -85,7 +85,7 @@ var code;
     // 发送方 发送包组信息
     code["reqGroupInfo"] = "06";
     // 接收方回应允许发送
-    code["repGroupInfo"] = "07";
+    code["recGroupInfo"] = "07";
     // 接收方回应当前阶段数据接收情况
     code["repReceiveInfo"] = "08";
     /**
@@ -159,6 +159,9 @@ var RDP = /** @class */ (function () {
         this.connectClientCache = {}; // 已发起，但是尚未成功建立的客户端
         this.connectServerMap = {}; // 当前在线的所有服务端
         this.connectServerCache = {}; // 已发起，但是尚未成功建立的服务端
+        this.receivedPackageCache = {}; // 已收到的包缓存（暂未处理的包）
+        this.receivedGroupCache = {}; // 已收到的包组缓存 用以判断包组是否接收完毕
+        this.receivedGroupInfoCache = {}; // 当前的包组信息
         this.eventEmitter = new EventEmitter();
         this.sourceId = 0;
         this.groupId = 0;
@@ -220,10 +223,10 @@ var RDP = /** @class */ (function () {
     RDP.prototype.sendData = function (address, port, data, callback) {
         // console.log(data.code, (packageCount += data.data?.length || 0));
         if (callback) {
-            this.dgram.send(Buffer.from(JSON.stringify(data)), port, address, callback);
+            this.dgram.send(JSON.stringify(data), port, address, callback);
         }
         else {
-            this.dgram.send(Buffer.from(JSON.stringify(data)), port, address, callback);
+            this.dgram.send(JSON.stringify(data), port, address, callback);
         }
     };
     RDP.prototype.send = function (address, port, data) {
@@ -243,7 +246,8 @@ var RDP = /** @class */ (function () {
         }
         // 如果尚未开始发送 启动发送函数
         if (!this.ifSending) {
-            this.sendWithCon();
+            this.sendPackageGroupInfo();
+            console.log("发送包组信息");
         }
     };
     // 发送单个数据包
@@ -337,16 +341,13 @@ var RDP = /** @class */ (function () {
             _this.sourceConcurrentQueue.splice(i, 1);
         });
     };
-    // 发送，并在发送成功之后调用自身
+    // 发送数据
     RDP.prototype.sendWithCon = function () {
         return __awaiter(this, void 0, void 0, function () {
             var i, obj, address, port, data;
             return __generator(this, function (_a) {
                 switch (_a.label) {
                     case 0:
-                        this.ifSending = true;
-                        // 获取并发包组
-                        this.computedPackageGroup();
                         // 所有包全部发送完毕，退出
                         if (!this.packageConcurrentQueue.length) {
                             this.ifSending = false;
@@ -372,8 +373,62 @@ var RDP = /** @class */ (function () {
                     case 4:
                         // 清空包并发队列
                         this.packageConcurrentQueue = [];
-                        this.sendWithCon();
                         return [2 /*return*/];
+                }
+            });
+        });
+    };
+    RDP.prototype.getGroupInfo = function () {
+        // 从第一个包中 获取接收方信息
+        var infoList = {};
+        this.packageConcurrentQueue.forEach(function (v) {
+            var address = v.address, port = v.port, packageId = v.packageId, groupId = v.groupId, sourceId = v.sourceId;
+            var key = "".concat(address, ":").concat(port);
+            if (!infoList[key]) {
+                infoList[key] = [];
+            }
+            infoList[key].push({
+                address: address,
+                port: port,
+                packageId: packageId,
+                groupId: groupId,
+                sourceId: sourceId,
+            });
+        });
+        return infoList;
+    };
+    // 发送并发包组信息
+    RDP.prototype.sendPackageGroupInfo = function () {
+        return __awaiter(this, void 0, void 0, function () {
+            var groupInfo, _a, _b, _i, key, info, _c, address, port;
+            return __generator(this, function (_d) {
+                switch (_d.label) {
+                    case 0:
+                        this.ifSending = true;
+                        // 获取并发包组
+                        this.computedPackageGroup();
+                        groupInfo = this.getGroupInfo();
+                        _a = [];
+                        for (_b in groupInfo)
+                            _a.push(_b);
+                        _i = 0;
+                        _d.label = 1;
+                    case 1:
+                        if (!(_i < _a.length)) return [3 /*break*/, 4];
+                        key = _a[_i];
+                        info = groupInfo[key];
+                        _c = key.split(":"), address = _c[0], port = _c[1];
+                        return [4 /*yield*/, this.sendOnePackage(address, port, {
+                                code: code.reqGroupInfo,
+                                data: info,
+                            })];
+                    case 2:
+                        _d.sent();
+                        _d.label = 3;
+                    case 3:
+                        _i++;
+                        return [3 /*break*/, 1];
+                    case 4: return [2 /*return*/];
                 }
             });
         });
@@ -394,16 +449,15 @@ var RDP = /** @class */ (function () {
     };
     RDP.prototype.bindMessage = function () {
         var _this = this;
-        var begin = Date.now();
         this.dgram.on("message", function (msg, rinfo) {
             var port = rinfo.port, address = rinfo.address;
             // msg = msg.toString();
+            var ipKey = "".concat(address, ":").concat(port);
             try {
-                var _a = JSON.parse(msg), code$1 = _a.code, data = _a.data, _b = _a.ind, ind = _b === void 0 ? 0 : _b, number = _a.group;
+                var _a = JSON.parse(msg), code$1 = _a.code, data = _a.data, _b = _a.ind, ind = _b === void 0 ? 0 : _b, groupId = _a.groupId, packageId = _a.packageId, sourceId = _a.sourceId;
                 // 连接尚未建立  此时接收到非建立连接请求的数据将会被忽略
                 if (Number(code$1) > Number(code.sucConnect)) {
-                    if (!_this.connectClientMap["".concat(address, ":").concat(port)] &&
-                        !_this.connectServerMap["".concat(address, ":").concat(port)]) {
+                    if (!_this.connectClientMap[ipKey] && !_this.connectServerMap[ipKey]) {
                         // 尚未建立连接，却收到高于连接建立的code，返回尚未建立连接code 拒绝连接
                         _this.sendData(address, port, {
                             code: code.reject,
@@ -417,20 +471,19 @@ var RDP = /** @class */ (function () {
                         // 回应客户端可以连入
                         _this.sendData(address, port, { code: code.repConnect });
                         // 如果目标已在连接列表中，重新连入将会移除之前的连接
-                        if (_this.connectClientMap["".concat(address, ":").concat(port)]) {
-                            delete _this.connectClientMap["".concat(address, ":").concat(port)];
+                        if (_this.connectClientMap[ipKey]) {
+                            delete _this.connectClientMap[ipKey];
                         }
-                        _this.connectClientCache["".concat(address, ":").concat(port)] = new default_1(_this, address, port);
+                        _this.connectClientCache[ipKey] = new default_1(_this, address, port);
                         break;
                     }
                     // 客户端接收到服务端回应
                     case code.repConnect: {
                         // 将当前连接对象移动到已连接map，并从缓存中删除该对象
-                        _this.connectServerMap["".concat(address, ":").concat(port)] =
-                            _this.connectServerCache["".concat(address, ":").concat(port)];
-                        delete _this.connectServerCache["".concat(address, ":").concat(port)];
+                        _this.connectServerMap[ipKey] = _this.connectServerCache[ipKey];
+                        delete _this.connectServerCache[ipKey];
                         // 触发客户端连接事件
-                        _this.connectServerMap["".concat(address, ":").concat(port)].emit("connect", _this.connectServerMap["".concat(address, ":").concat(port)]);
+                        _this.connectServerMap[ipKey].emit("connect", _this.connectServerMap[ipKey]);
                         // 回应服务端收到回信 连接建立
                         _this.sendData(address, port, { code: code.sucConnect });
                         break;
@@ -438,31 +491,47 @@ var RDP = /** @class */ (function () {
                     // 服务端接收到客户端回应
                     case code.sucConnect: {
                         // 将当前连接对象移动到已连接map，并从缓存中删除该对象
-                        _this.connectClientMap["".concat(address, ":").concat(port)] =
-                            _this.connectClientCache["".concat(address, ":").concat(port)];
-                        delete _this.connectClientCache["".concat(address, ":").concat(port)];
+                        _this.connectClientMap[ipKey] = _this.connectClientCache[ipKey];
+                        delete _this.connectClientCache[ipKey];
                         // 服务端触发连接事件
-                        _this.eventEmitter.emit("connect", _this.connectClientMap["".concat(address, ":").concat(port)]);
+                        _this.eventEmitter.emit("connect", _this.connectClientMap[ipKey]);
                         break;
                     }
                     // 服务端收到客户端ping 回应pong
                     case code.ping: {
-                        var client = _this.connectClientMap["".concat(address, ":").concat(port)];
+                        var client = _this.connectClientMap[ipKey];
                         client.pong();
                         client.timeoutCount--;
                         break;
                     }
                     // 客户端收到pong
                     case code.pong: {
-                        var server = _this.connectServerMap["".concat(address, ":").concat(port)];
+                        var server = _this.connectServerMap[ipKey];
                         server.timeoutCount--;
                         break;
                     }
                     // 服务端/客户端接收到数据
                     case code.sendData: {
-                        // console.log("收到数据", data);
-                        console.log((Date.now() - begin) / 1000);
+                        var connectObj = _this.connectServerMap[ipKey] || _this.connectClientMap[ipKey];
+                        if (!_this.receivedPackageCache[ipKey]) {
+                            _this.receivedPackageCache[ipKey] = [];
+                        }
+                        if (!_this.receivedGroupCache[ipKey]) {
+                            _this.receivedGroupCache[ipKey] = [];
+                        }
+                        _this.receivedPackageCache[ipKey].push(data);
+                        _this.receivedGroupInfoCache[ipKey].push({
+                            packageId: packageId,
+                            sourceId: sourceId,
+                            groupId: groupId,
+                        });
                         break;
+                    }
+                    // 接收方收到包组信息
+                    case code.reqGroupInfo: {
+                        console.log(data);
+                        _this.receivedGroupInfoCache[ipKey] = __assign({}, data);
+                        return;
                     }
                 }
             }

@@ -11,8 +11,9 @@ export const connectClientEvent = Symbol("connect.client.event");
 export type msg = {
   code: string;
   ind: number; // 数据包顺序
-  group: number; // 包组id
-  src: number; // 原始包id
+  groupId: number; // 包组id
+  sourceId: number; // 原始包id
+  packageId: number;
   data: any;
 };
 
@@ -31,11 +32,11 @@ export enum code {
   /**
    * 发送数据
    */
-  sendData = "05", // 发送字符串数据
+  sendData = "05",
   // 发送方 发送包组信息
   reqGroupInfo = "06",
   // 接收方回应允许发送
-  repGroupInfo = "07",
+  recGroupInfo = "07",
   // 接收方回应当前阶段数据接收情况
   repReceiveInfo = "08",
 

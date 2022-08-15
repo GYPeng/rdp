@@ -21,6 +21,9 @@ export default class RDP {
   private connectClientCache: any = {}; // 已发起，但是尚未成功建立的客户端
   private connectServerMap: any = {}; // 当前在线的所有服务端
   private connectServerCache: any = {}; // 已发起，但是尚未成功建立的服务端
+  private receivedPackageCache: any = {}; // 已收到的包缓存（暂未处理的包）
+  private receivedGroupCache: any = {}; // 已收到的包组缓存 用以判断包组是否接收完毕
+  private receivedGroupInfoCache: any = {}; // 当前的包组信息
   private eventEmitter = new EventEmitter();
   private sourceId: number = 0;
   private groupId: number = 0;
@@ -87,19 +90,9 @@ export default class RDP {
   ) {
     // console.log(data.code, (packageCount += data.data?.length || 0));
     if (callback) {
-      this.dgram.send(
-        Buffer.from(JSON.stringify(data)),
-        port,
-        address,
-        callback
-      );
+      this.dgram.send(JSON.stringify(data), port, address, callback);
     } else {
-      this.dgram.send(
-        Buffer.from(JSON.stringify(data)),
-        port,
-        address,
-        callback
-      );
+      this.dgram.send(JSON.stringify(data), port, address, callback);
     }
   }
   send(address: string, port: number | string, data: any) {
@@ -116,7 +109,8 @@ export default class RDP {
     }
     // 如果尚未开始发送 启动发送函数
     if (!this.ifSending) {
-      this.sendWithCon();
+      this.sendPackageGroupInfo();
+      console.log("发送包组信息");
     }
   }
   // 发送单个数据包
@@ -235,11 +229,8 @@ export default class RDP {
       this.sourceConcurrentQueue.splice(i, 1);
     });
   }
-  // 发送，并在发送成功之后调用自身
+  // 发送数据
   async sendWithCon() {
-    this.ifSending = true;
-    // 获取并发包组
-    this.computedPackageGroup();
     // 所有包全部发送完毕，退出
     if (!this.packageConcurrentQueue.length) {
       this.ifSending = false;
@@ -255,8 +246,44 @@ export default class RDP {
     }
     // 清空包并发队列
     this.packageConcurrentQueue = [];
+  }
+  getGroupInfo() {
+    // 从第一个包中 获取接收方信息
+    const infoList = {};
 
-    this.sendWithCon();
+    this.packageConcurrentQueue.forEach((v) => {
+      const { address, port, packageId, groupId, sourceId } = v;
+      const key = `${address}:${port}`;
+      if (!infoList[key]) {
+        infoList[key] = [];
+      }
+      infoList[key].push({
+        address,
+        port,
+        packageId,
+        groupId,
+        sourceId,
+      });
+    });
+
+    return infoList;
+  }
+  // 发送并发包组信息
+  async sendPackageGroupInfo() {
+    this.ifSending = true;
+    // 获取并发包组
+    this.computedPackageGroup();
+    const groupInfo = this.getGroupInfo();
+
+    for (let key in groupInfo) {
+      const info = groupInfo[key];
+      const [address, port] = key.split(":");
+
+      await this.sendOnePackage(address, port, {
+        code: CODE.reqGroupInfo,
+        data: info,
+      });
+    }
   }
   // “客户端”方法，其实是发起端
   connect(address: string, port: string | number) {
@@ -284,14 +311,20 @@ export default class RDP {
     this.dgram.on("message", (msg: string, rinfo) => {
       const { port, address } = rinfo;
       // msg = msg.toString();
+      const ipKey = `${address}:${port}`;
       try {
-        const { code, data, ind = 0, group: number }: msgType = JSON.parse(msg);
+        const {
+          code,
+          data,
+          ind = 0,
+          groupId,
+          packageId,
+          sourceId,
+        }: msgType = JSON.parse(msg);
+
         // 连接尚未建立  此时接收到非建立连接请求的数据将会被忽略
         if (Number(code) > Number(CODE.sucConnect)) {
-          if (
-            !this.connectClientMap[`${address}:${port}`] &&
-            !this.connectServerMap[`${address}:${port}`]
-          ) {
+          if (!this.connectClientMap[ipKey] && !this.connectServerMap[ipKey]) {
             // 尚未建立连接，却收到高于连接建立的code，返回尚未建立连接code 拒绝连接
             this.sendData(address, port, {
               code: CODE.reject,
@@ -306,10 +339,10 @@ export default class RDP {
             // 回应客户端可以连入
             this.sendData(address, port, { code: CODE.repConnect });
             // 如果目标已在连接列表中，重新连入将会移除之前的连接
-            if (this.connectClientMap[`${address}:${port}`]) {
-              delete this.connectClientMap[`${address}:${port}`];
+            if (this.connectClientMap[ipKey]) {
+              delete this.connectClientMap[ipKey];
             }
-            this.connectClientCache[`${address}:${port}`] = new connectClient(
+            this.connectClientCache[ipKey] = new connectClient(
               this,
               address,
               port
@@ -319,13 +352,12 @@ export default class RDP {
           // 客户端接收到服务端回应
           case CODE.repConnect: {
             // 将当前连接对象移动到已连接map，并从缓存中删除该对象
-            this.connectServerMap[`${address}:${port}`] =
-              this.connectServerCache[`${address}:${port}`];
-            delete this.connectServerCache[`${address}:${port}`];
+            this.connectServerMap[ipKey] = this.connectServerCache[ipKey];
+            delete this.connectServerCache[ipKey];
             // 触发客户端连接事件
-            this.connectServerMap[`${address}:${port}`].emit(
+            this.connectServerMap[ipKey].emit(
               "connect",
-              this.connectServerMap[`${address}:${port}`]
+              this.connectServerMap[ipKey]
             );
             // 回应服务端收到回信 连接建立
             this.sendData(address, port, { code: CODE.sucConnect });
@@ -334,34 +366,51 @@ export default class RDP {
           // 服务端接收到客户端回应
           case CODE.sucConnect: {
             // 将当前连接对象移动到已连接map，并从缓存中删除该对象
-            this.connectClientMap[`${address}:${port}`] =
-              this.connectClientCache[`${address}:${port}`];
-            delete this.connectClientCache[`${address}:${port}`];
+            this.connectClientMap[ipKey] = this.connectClientCache[ipKey];
+            delete this.connectClientCache[ipKey];
             // 服务端触发连接事件
-            this.eventEmitter.emit(
-              "connect",
-              this.connectClientMap[`${address}:${port}`]
-            );
+            this.eventEmitter.emit("connect", this.connectClientMap[ipKey]);
             break;
           }
           // 服务端收到客户端ping 回应pong
           case CODE.ping: {
-            const client = this.connectClientMap[`${address}:${port}`];
+            const client = this.connectClientMap[ipKey];
             client.pong();
             client.timeoutCount--;
             break;
           }
           // 客户端收到pong
           case CODE.pong: {
-            const server = this.connectServerMap[`${address}:${port}`];
+            const server = this.connectServerMap[ipKey];
             server.timeoutCount--;
             break;
           }
           // 服务端/客户端接收到数据
           case CODE.sendData: {
-            // console.log("收到数据", data);
-            console.log((Date.now() - begin) / 1000);
+            const connectObj =
+              this.connectServerMap[ipKey] || this.connectClientMap[ipKey];
+
+            if (!this.receivedPackageCache[ipKey]) {
+              this.receivedPackageCache[ipKey] = [];
+            }
+            if (!this.receivedGroupCache[ipKey]) {
+              this.receivedGroupCache[ipKey] = [];
+            }
+            this.receivedPackageCache[ipKey].push(data);
+            this.receivedGroupInfoCache[ipKey].push({
+              packageId,
+              sourceId,
+              groupId,
+            });
             break;
+          }
+          // 接收方收到包组信息
+          case CODE.reqGroupInfo: {
+            console.log(data);
+            this.receivedGroupInfoCache[ipKey] = {
+              ...data,
+            };
+            return;
           }
         }
       } catch (e) {
