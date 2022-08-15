@@ -7,3 +7,10 @@ export const isArray = (target: any) => Array.isArray(target);
 
 export const isObject = (target: any) =>
   Object.prototype.toString.call(target) === "[object Object]";
+
+export const sleep = (timeout) =>
+  new Promise((resolve) => {
+    setTimeout(() => {
+      resolve;
+    }, timeout);
+  });

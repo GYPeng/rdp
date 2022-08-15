@@ -38,7 +38,9 @@ export enum code {
   // 接收方回应允许发送
   recGroupInfo = "07",
   // 接收方回应当前阶段数据接收情况
-  repReceiveInfo = "08",
+  recReceiveInfo = "08",
+  // 发送源包信息 （源包发送结束标识）
+  reqSourceInfo = "09",
 
   /**
    * 尚未建立连接，拒绝处理

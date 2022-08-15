@@ -6,6 +6,7 @@ export default class {
   private address: string;
   private port: number | number;
   timeoutCount: number = 0;
+  isInteraction = false;
   constructor(rdp, address, port) {
     this.rdp = rdp;
     this.address = address;

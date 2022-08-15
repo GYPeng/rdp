@@ -87,7 +87,9 @@ var code;
     // 接收方回应允许发送
     code["recGroupInfo"] = "07";
     // 接收方回应当前阶段数据接收情况
-    code["repReceiveInfo"] = "08";
+    code["recReceiveInfo"] = "08";
+    // 发送源包信息 （源包发送结束标识）
+    code["reqSourceInfo"] = "09";
     /**
      * 尚未建立连接，拒绝处理
      */
@@ -100,6 +102,7 @@ var default_1 = /** @class */ (function () {
     function default_1(rdp, address, port) {
         this[_a] = new EventEmitter$1();
         this.timeoutCount = 0;
+        this.isInteraction = false;
         this.rdp = rdp;
         this.address = address;
         this.port = port;
@@ -167,6 +170,7 @@ var RDP = /** @class */ (function () {
         this.groupId = 0;
         this.packageId = 0;
         this.ifSending = false;
+        this.dataReceivedTimeout = {}; // 数据接收超时计时器
         this.port = port;
         this.dgram = dgram.createSocket("udp4");
         this.dgram.bind(port);
@@ -179,6 +183,10 @@ var RDP = /** @class */ (function () {
         setInterval(function () {
             for (var key in _this.connectServerMap) {
                 var server = _this.connectServerMap[key];
+                if (server.isInteraction) {
+                    server.isInteraction = false;
+                    continue;
+                }
                 // 如果服务端超时
                 if (server.timeoutCount > 3) {
                     // 触发该连接对象 err事件
@@ -200,6 +208,10 @@ var RDP = /** @class */ (function () {
             }
             for (var key in _this.connectClientMap) {
                 var client = _this.connectClientMap[key];
+                if (client.isInteraction) {
+                    client.isInteraction = false;
+                    continue;
+                }
                 // 如果服务端超时
                 if (client.timeoutCount > 3) {
                     // 触发该连接对象 err事件
@@ -247,7 +259,7 @@ var RDP = /** @class */ (function () {
         // 如果尚未开始发送 启动发送函数
         if (!this.ifSending) {
             this.sendPackageGroupInfo();
-            console.log("发送包组信息");
+            // console.log("发送包组信息");
         }
     };
     // 发送单个数据包
@@ -261,7 +273,8 @@ var RDP = /** @class */ (function () {
     RDP.prototype.computedSourceConcurrentQueue = function () {
         for (var i = 0; i <
             Math.min(Math.max(this.sourceConcurrent - this.sourceConcurrentQueue.length, 0), this.sourceQueue.length); i++) {
-            this.sourceConcurrentQueue.push(this.sourceQueue.shift());
+            var source = this.sourceQueue.shift();
+            this.sourceConcurrentQueue.push(source);
         }
     };
     // 获取一个发送失败的数据包
@@ -283,7 +296,13 @@ var RDP = /** @class */ (function () {
         var delArr = [];
         // 发送失败的包数量
         var failedCount = this.packageFailed.length;
-        var conPakCount = Math.min(this.concurrent, Math.max(this.sourceConcurrentQueue.length, failedCount));
+        this.concurrent += this.coe;
+        var conPakCount = this.concurrent;
+        // console.log("并发队列", conPakCount);
+        // Math.min(
+        //   this.concurrent,
+        //   Math.max(this.sourceConcurrentQueue.length, failedCount)
+        // );
         var groupId = this.groupId++;
         for (var ind = 0; ind < conPakCount; ind++) {
             var obj = void 0;
@@ -299,6 +318,9 @@ var RDP = /** @class */ (function () {
                 }
                 obj = this.sourceConcurrentQueue[i];
             }
+            if (!obj) {
+                continue;
+            }
             var address = obj.address, port = obj.port, data = obj.data, type = obj.type, _a = obj.sliceBegin, sliceBegin = _a === void 0 ? 0 : _a, sourceId = obj.sourceId, packageId = obj.packageId;
             var realData = data.data;
             var buf = void 0;
@@ -313,7 +335,7 @@ var RDP = /** @class */ (function () {
                 continue;
             }
             // 切片大小 5kb
-            var sliceEnd = Math.min(buf.length, 100 + sliceBegin);
+            var sliceEnd = Math.min(buf.length, 1000 + sliceBegin);
             var sliceBuf = buf.subarray(sliceBegin, sliceEnd);
             // 如果已经到达buf尾
             if (sliceEnd === buf.length) {
@@ -340,6 +362,7 @@ var RDP = /** @class */ (function () {
             // 删除已分包完毕的数据
             _this.sourceConcurrentQueue.splice(i, 1);
         });
+        // console.log(this.packageConcurrentQueue.length);
     };
     // 发送数据
     RDP.prototype.sendWithCon = function () {
@@ -348,11 +371,6 @@ var RDP = /** @class */ (function () {
             return __generator(this, function (_a) {
                 switch (_a.label) {
                     case 0:
-                        // 所有包全部发送完毕，退出
-                        if (!this.packageConcurrentQueue.length) {
-                            this.ifSending = false;
-                            return [2 /*return*/];
-                        }
                         i = 0;
                         _a.label = 1;
                     case 1:
@@ -370,10 +388,7 @@ var RDP = /** @class */ (function () {
                     case 3:
                         i++;
                         return [3 /*break*/, 1];
-                    case 4:
-                        // 清空包并发队列
-                        this.packageConcurrentQueue = [];
-                        return [2 /*return*/];
+                    case 4: return [2 /*return*/];
                 }
             });
         });
@@ -454,7 +469,7 @@ var RDP = /** @class */ (function () {
             // msg = msg.toString();
             var ipKey = "".concat(address, ":").concat(port);
             try {
-                var _a = JSON.parse(msg), code$1 = _a.code, data = _a.data, _b = _a.ind, ind = _b === void 0 ? 0 : _b, groupId = _a.groupId, packageId = _a.packageId, sourceId = _a.sourceId;
+                var _a = JSON.parse(msg), code$1 = _a.code, data_1 = _a.data, _b = _a.ind, ind = _b === void 0 ? 0 : _b, groupId = _a.groupId, packageId = _a.packageId, sourceId = _a.sourceId;
                 // 连接尚未建立  此时接收到非建立连接请求的数据将会被忽略
                 if (Number(code$1) > Number(code.sucConnect)) {
                     if (!_this.connectClientMap[ipKey] && !_this.connectServerMap[ipKey]) {
@@ -464,6 +479,11 @@ var RDP = /** @class */ (function () {
                         });
                         return;
                     }
+                }
+                var connectObj = _this.connectServerMap[ipKey] || _this.connectClientMap[ipKey];
+                if (connectObj) {
+                    connectObj.isInteraction = true;
+                    connectObj.timeoutCount = 0;
                 }
                 switch (code$1) {
                     // 服务端接收到客户端请求连接
@@ -501,36 +521,138 @@ var RDP = /** @class */ (function () {
                     case code.ping: {
                         var client = _this.connectClientMap[ipKey];
                         client.pong();
-                        client.timeoutCount--;
                         break;
                     }
                     // 客户端收到pong
                     case code.pong: {
-                        var server = _this.connectServerMap[ipKey];
-                        server.timeoutCount--;
+                        // const server = this.connectServerMap[ipKey];
+                        // server.timeoutCount = 0;
                         break;
                     }
                     // 服务端/客户端接收到数据
                     case code.sendData: {
-                        var connectObj = _this.connectServerMap[ipKey] || _this.connectClientMap[ipKey];
                         if (!_this.receivedPackageCache[ipKey]) {
                             _this.receivedPackageCache[ipKey] = [];
                         }
                         if (!_this.receivedGroupCache[ipKey]) {
                             _this.receivedGroupCache[ipKey] = [];
                         }
-                        _this.receivedPackageCache[ipKey].push(data);
-                        _this.receivedGroupInfoCache[ipKey].push({
+                        _this.receivedPackageCache[ipKey].push(data_1);
+                        // console.log(
+                        //   "已接收到的包数量",
+                        //   this.receivedPackageCache[ipKey].length / 1000 + "MB"
+                        // );
+                        _this.receivedGroupCache[ipKey].push({
                             packageId: packageId,
                             sourceId: sourceId,
                             groupId: groupId,
                         });
+                        // 接收到数据，清空超时计时器
+                        clearTimeout(_this.dataReceivedTimeout[ipKey]);
+                        // 判断包组是否接收完毕
+                        if (_this.receivedGroupCache[ipKey].every(function (cache) {
+                            return _this.receivedGroupInfoCache[ipKey].find(function (v) {
+                                return v.packageId === cache.packageId &&
+                                    v.groupId === cache.groupId &&
+                                    v.sourceId === cache.sourceId;
+                            });
+                        })) {
+                            // 如果接收完毕，立即回应发送方（没有参数表示全部接收成功）
+                            _this.sendData(address, port, { code: code.recReceiveInfo });
+                            // 清空包组信息
+                            _this.receivedGroupCache[ipKey] = [];
+                            // 清空已接收完的包组
+                            _this.receivedGroupInfoCache[ipKey] = [];
+                        }
+                        else {
+                            // 数据未接收完毕，设置超时计时器
+                            _this.dataReceivedTimeout[ipKey] = setTimeout(function () {
+                                // 计算丢包信息
+                                var lostInfo = _this.receivedGroupCache[ipKey].filter(function (cache) {
+                                    return !_this.receivedGroupInfoCache[ipKey].find(function (v) {
+                                        return v.packageId === cache.packageId &&
+                                            v.groupId === cache.groupId &&
+                                            v.sourceId === cache.sourceId;
+                                    });
+                                });
+                                // 500毫秒内，没有接收到发送方数据，视为数据接收超时（丢包）  回应发送方接收情况
+                                _this.sendData(address, port, {
+                                    code: code.recReceiveInfo,
+                                    data: lostInfo,
+                                });
+                                // 清空包组信息
+                                _this.receivedGroupCache[ipKey] = [];
+                                // 清空已接收完的包组
+                                _this.receivedGroupInfoCache[ipKey] = [];
+                            }, 400);
+                        }
+                        // console.log(this.receivedPackageCache[ipKey].length);
                         break;
                     }
                     // 接收方收到包组信息
                     case code.reqGroupInfo: {
-                        console.log(data);
-                        _this.receivedGroupInfoCache[ipKey] = __assign({}, data);
+                        // console.log("包组信息", data);
+                        _this.receivedGroupInfoCache[ipKey] = data_1;
+                        // 回应发送端
+                        _this.sendData(address, port, {
+                            code: code.recGroupInfo,
+                            data: groupId,
+                        });
+                        return;
+                    }
+                    // 发送方收到包组回应
+                    case code.recGroupInfo: {
+                        // console.log("收到包组回应");
+                        //  调用发送方法
+                        // setTimeout(() => {
+                        _this.sendWithCon();
+                        // console.log("并发数", this.packageConcurrentQueue.length);
+                        console.log(_this.sourceQueue.length);
+                        // }, 300);
+                        return;
+                    }
+                    // 发送方收到接收方 接收回调
+                    case code.recReceiveInfo: {
+                        (data_1 === null || data_1 === void 0 ? void 0 : data_1.length) >>> 0
+                            ? console.log("丢包数", (data_1 === null || data_1 === void 0 ? void 0 : data_1.length) >>> 0)
+                            : null;
+                        _this.packageConcurrentCache = _this.packageConcurrentCache.filter(function (cache) {
+                            return (data_1 || []).find(function (v) {
+                                return v.packageId === cache.packageId &&
+                                    v.groupId === cache.groupId &&
+                                    v.sourceId === cache.sourceId;
+                            });
+                        });
+                        // console.log(data?.length >>> 0, this.packageConcurrentQueue.length);
+                        // console.log(
+                        //   count++,
+                        //   this.packageConcurrentCache.length,
+                        //   this.concurrent
+                        // );
+                        // console.log("当前包组发送情", data);
+                        if (!data_1) {
+                            // 全部发送成功
+                            _this.coe *= 2;
+                            setTimeout(function () {
+                                // 所有包全部发送完毕，退出
+                                if (!_this.packageConcurrentQueue.length) {
+                                    _this.ifSending = false;
+                                }
+                            }, 100);
+                        }
+                        else {
+                            // 当前并发数量 减去丢包数量
+                            _this.concurrent = Math.max(_this.concurrent - data_1.length, 1);
+                            // 部分发送成功
+                            if (data_1.length > _this.packageConcurrentQueue.length / 2) {
+                                // 丢包率大于三分之一 重置增量系数
+                                _this.coe = 1;
+                            }
+                        }
+                        // 清空包并发队列
+                        _this.packageConcurrentQueue = [];
+                        // 调用计算并发送当前包组方法
+                        _this.sendPackageGroupInfo();
                         return;
                     }
                 }
