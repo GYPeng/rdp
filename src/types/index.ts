@@ -15,6 +15,7 @@ export type msg = {
   sourceId: number; // 原始包id
   packageId: number;
   data: any;
+  packageIds: Array<number>;
 };
 
 export enum code {
